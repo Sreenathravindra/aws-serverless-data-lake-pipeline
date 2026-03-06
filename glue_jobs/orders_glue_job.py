@@ -26,8 +26,11 @@ args = getResolvedOptions(
     ]
 )
 
+INPUT_PATH = args["INPUT_PATH"]
+OUTPUT_PATH = args["OUTPUT_PATH"]
+
 # -----------------------------
-# Initialize Glue
+# Initialize Spark & Glue
 # -----------------------------
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -36,19 +39,23 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-logger.info("Glue job started")
+logger.info("=======================================")
+logger.info("Glue ETL Job Started")
+logger.info(f"INPUT_PATH : {INPUT_PATH}")
+logger.info(f"OUTPUT_PATH: {OUTPUT_PATH}")
+logger.info("=======================================")
 
 try:
 
     # -----------------------------
-    # Read staging data
+    # Read data from S3
     # -----------------------------
-    logger.info(f"Reading data from {args['INPUT_PATH']}")
+    logger.info("Reading CSV files from S3")
 
     datasource = glueContext.create_dynamic_frame.from_options(
         connection_type="s3",
         connection_options={
-            "paths": [args["INPUT_PATH"]],
+            "paths": [INPUT_PATH],
             "recurse": True
         },
         format="csv",
@@ -56,6 +63,17 @@ try:
     )
 
     df = datasource.toDF()
+
+    record_count = df.count()
+    logger.info(f"Total records read: {record_count}")
+
+    if record_count == 0:
+        logger.warning("No data found in input path. Exiting job.")
+        job.commit()
+        sys.exit(0)
+
+    logger.info("Input schema:")
+    df.printSchema()
 
     # -----------------------------
     # Transformations
@@ -72,8 +90,10 @@ try:
     )
 
     # -----------------------------
-    # Partition columns
+    # Add partition columns
     # -----------------------------
+    logger.info("Adding partition columns")
+
     df_partitioned = (
         df_clean
         .withColumn("year", year("processed_timestamp"))
@@ -82,27 +102,29 @@ try:
     )
 
     # -----------------------------
-    # Write parquet
+    # Write parquet to S3
     # -----------------------------
-    logger.info(f"Writing parquet to {args['OUTPUT_PATH']}")
+    logger.info("Writing parquet files to curated layer")
 
     (
         df_partitioned.write
         .mode("append")
         .partitionBy("year", "month", "day")
-        .parquet(args["OUTPUT_PATH"])
+        .parquet(OUTPUT_PATH)
     )
 
-    logger.info("Write completed successfully")
+    logger.info("Parquet write completed successfully")
 
 except Exception as e:
-    logger.error("Glue job failed")
+
+    logger.error("Glue job failed due to exception")
     logger.error(str(e))
     raise
 
 # -----------------------------
-# Commit bookmark
+# Commit job
 # -----------------------------
 job.commit()
 
-logger.info("Glue job completed")
+logger.info("Glue ETL Job Completed Successfully")
+logger.info("=======================================")
