@@ -1,1 +1,1 @@
-# aws-glue-etl-pipeline
+# aws-serverless-data-lake-pipeline
