@@ -1,141 +1,38 @@
 import sys
-import logging
-
 from pyspark.context import SparkContext
-from pyspark.sql.functions import col, trim, lower, year, month, dayofmonth, current_timestamp
-from pyspark.sql.types import IntegerType, DoubleType
-
+from pyspark.sql.functions import col
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
-from awsglue.dynamicframe import DynamicFrame
 
+args = getResolvedOptions(sys.argv, ['JOB_NAME','INPUT_PATH','OUTPUT_PATH'])
 
-# ---------------------------------------
-# Logging
-# ---------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------
-# Job Parameters
-# ---------------------------------------
-args = getResolvedOptions(
-    sys.argv,
-    [
-        "JOB_NAME",
-        "INPUT_PATH",
-        "OUTPUT_PATH"
-    ]
-)
-
-
-# ---------------------------------------
-# Initialize Glue Context
-# ---------------------------------------
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
 job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+job.init(args['JOB_NAME'], args)
 
-logger.info("Glue Job Started")
+input_path = args['INPUT_PATH']
+output_path = args['OUTPUT_PATH']
 
+print("Reading data from:", input_path)
 
-try:
+df = spark.read.option("header","true").csv(input_path)
 
-    # ---------------------------------------
-    # Read Data from S3 (Processed Layer)
-    # ---------------------------------------
-    logger.info(f"Reading input data from {args['INPUT_PATH']}")
+print("Total rows:", df.count())
 
-    datasource = glueContext.create_dynamic_frame.from_options(
-        connection_type="s3",
-        connection_options={
-            "paths": [args["INPUT_PATH"]],
-            "recurse": True
-        },
-        format="csv",
-        format_options={
-            "withHeader": True,
-            "separator": ","
-        }
-    )
+df.show(5)
 
-    df = datasource.toDF()
+# Cast columns
+df = df.withColumn("amount", col("amount").cast("double"))
+df = df.withColumn("quantity", col("quantity").cast("int"))
 
-    logger.info(f"Input record count: {df.count()}")
+print("Writing data to:", output_path)
 
+df.write.mode("overwrite").parquet(output_path)
 
-    # ---------------------------------------
-    # Data Cleaning & Transformations
-    # ---------------------------------------
-    logger.info("Applying transformations")
-
-    df_clean = (
-        df
-        .withColumn("order_id", col("order_id").cast(IntegerType()))
-        .withColumn("amount", col("amount").cast(DoubleType()))
-        .withColumn("quantity", col("quantity").cast(IntegerType()))
-        .withColumn("customer_name", trim(col("customer_name")))
-        .withColumn("product", lower(trim(col("product"))))
-        .withColumn("processed_timestamp", current_timestamp())
-    )
-
-
-    # ---------------------------------------
-    # Add Partition Columns
-    # ---------------------------------------
-    df_partitioned = (
-        df_clean
-        .withColumn("year", year("processed_timestamp"))
-        .withColumn("month", month("processed_timestamp"))
-        .withColumn("day", dayofmonth("processed_timestamp"))
-    )
-
-
-    # ---------------------------------------
-    # Convert DataFrame → DynamicFrame
-    # ---------------------------------------
-    logger.info("Converting DataFrame to DynamicFrame")
-
-    dynamic_frame = DynamicFrame.fromDF(
-        df_partitioned,
-        glueContext,
-        "dynamic_frame"
-    )
-
-
-    # ---------------------------------------
-    # Write Data to Curated Layer
-    # ---------------------------------------
-    logger.info(f"Writing parquet output to {args['OUTPUT_PATH']}")
-
-    glueContext.write_dynamic_frame.from_options(
-        frame=dynamic_frame,
-        connection_type="s3",
-        connection_options={
-            "path": args["OUTPUT_PATH"],
-            "partitionKeys": ["year", "month", "day"]
-        },
-        format="parquet"
-    )
-
-    logger.info("Data successfully written to curated layer")
-
-
-except Exception as e:
-
-    logger.error("Glue job failed")
-    logger.error(str(e))
-    raise
-
-
-# ---------------------------------------
-# Commit Job
-# ---------------------------------------
 job.commit()
 
-logger.info("Glue job completed successfully")
+print("Job completed successfully")
