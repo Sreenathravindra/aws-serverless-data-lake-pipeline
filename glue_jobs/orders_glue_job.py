@@ -56,3 +56,5 @@ print("Write completed successfully")
 job.commit()
 
 print("===== JOB COMPLETED =====")
+print("Row count:", df.count())
+df.show(10)
