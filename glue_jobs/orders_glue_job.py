@@ -1,6 +1,7 @@
 import sys
 from pyspark.context import SparkContext
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, trim, lower, current_timestamp
+from pyspark.sql.types import IntegerType, DoubleType
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
@@ -8,7 +9,7 @@ from awsglue.utils import getResolvedOptions
 # Read job parameters
 args = getResolvedOptions(sys.argv, ['JOB_NAME','INPUT_PATH','OUTPUT_PATH'])
 
-# Initialize Spark + Glue
+# Initialize Glue
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -16,13 +17,14 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
+print("===== JOB STARTED =====")
+
 input_path = args['INPUT_PATH']
 output_path = args['OUTPUT_PATH']
 
-print("===== JOB STARTED =====")
+print("Reading CSV from:", input_path)
 
-print("Reading data from:", input_path)
-
+# Read CSV
 df = spark.read.option("header","true").csv(input_path)
 
 print("Schema:")
@@ -31,25 +33,25 @@ df.printSchema()
 print("Sample data:")
 df.show(5)
 
-row_count = df.count()
+print("Total rows:", df.count())
 
-print("Total rows read:", row_count)
+# Transform
+df_clean = (
+    df.withColumn("order_id", col("order_id").cast(IntegerType()))
+      .withColumn("amount", col("amount").cast(DoubleType()))
+      .withColumn("quantity", col("quantity").cast(IntegerType()))
+      .withColumn("customer_name", trim(col("customer_name")))
+      .withColumn("product", lower(col("product")))
+      .withColumn("processed_timestamp", current_timestamp())
+)
 
-if row_count == 0:
-    print("⚠️ No data found in input path!")
-else:
-    print("Transforming data...")
+print("Writing parquet to:", output_path)
 
-    df = df.withColumn("amount", col("amount").cast("double")) \
-           .withColumn("quantity", col("quantity").cast("int"))
+df_clean.write \
+    .mode("append") \
+    .parquet(output_path)
 
-    print("Writing parquet to:", output_path)
-
-    df.write \
-        .mode("append") \
-        .parquet(output_path)
-
-    print("Write completed!")
+print("Write completed successfully")
 
 job.commit()
 
