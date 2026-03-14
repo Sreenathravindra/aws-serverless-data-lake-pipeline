@@ -51,15 +51,20 @@ job.init(args["JOB_NAME"], args)
 # Read Validated Data from S3
 # ----------------------------------
 
-logger.info("Reading validated data from S3")
-
 df = (
     spark.read
-    .option("header", "true")
-    .option("inferSchema", "true")
-    .option("multiLine", "true")
+    .option("header","true")
+    .option("inferSchema","true")
+    .option("multiLine","true")
+    .option("quote",'"')
+    .option("escape",'"')
+    .option("recursiveFileLookup","true")
     .csv(input_path)
 )
+
+print("Rows:", df.count())
+
+df.show(5, False)
 
 
 # ----------------------------------
