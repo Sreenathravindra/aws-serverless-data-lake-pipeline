@@ -2,12 +2,13 @@ import sys
 import logging
 
 from pyspark.context import SparkContext
-from pyspark.sql.functions import col, trim, lower, current_timestamp, year, month, dayofmonth
+from pyspark.sql.functions import *
 from pyspark.sql.types import IntegerType, DoubleType
 
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
+from awsglue.dynamicframe import DynamicFrame
 
 
 # ----------------------------------
@@ -17,11 +18,9 @@ from awsglue.utils import getResolvedOptions
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("Starting Glue Job")
-
 
 # ----------------------------------
-# Read Job Parameters
+# Job Parameters
 # ----------------------------------
 
 args = getResolvedOptions(
@@ -29,12 +28,16 @@ args = getResolvedOptions(
     [
         "JOB_NAME",
         "INPUT_PATH",
-        "OUTPUT_PATH"
+        "CURATED_PATH",
+        "REDSHIFT_TEMP_DIR",
+        "REDSHIFT_CONNECTION"
     ]
 )
 
 input_path = args["INPUT_PATH"]
-output_path = args["OUTPUT_PATH"]
+curated_path = args["CURATED_PATH"]
+temp_dir = args["REDSHIFT_TEMP_DIR"]
+redshift_conn = args["REDSHIFT_CONNECTION"]
 
 
 # ----------------------------------
@@ -49,88 +52,174 @@ job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
 
-logger.info(f"Input Path: {input_path}")
-logger.info(f"Output Path: {output_path}")
+# ----------------------------------
+# Read Validated Data from S3
+# ----------------------------------
+
+logger.info("Reading validated data from S3")
+
+df = (
+    spark.read
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .csv(input_path)
+)
 
 
-try:
+# ----------------------------------
+# Data Cleaning
+# ----------------------------------
 
-    # ----------------------------------
-    # Read Source Data
-    # ----------------------------------
+logger.info("Applying transformations")
 
-    logger.info("Reading CSV files from S3")
+df_clean = (
 
-    df = (
-        spark.read
-        .option("header", "true")
-        .option("inferSchema", "true")
-        .csv(input_path)
+    df.withColumn("price", col("price").cast(DoubleType()))
+    .withColumn("quantity", col("quantity").cast(IntegerType()))
+    .withColumn("discount", col("discount").cast(DoubleType()))
+    .withColumn("customer_name", trim(col("customer_name")))
+    .withColumn("product_name", lower(col("product_name")))
+    .withColumn("order_timestamp",
+                to_timestamp("order_timestamp", "dd-MM-yyyy HH:mm"))
+)
+
+
+# ----------------------------------
+# Create Date Columns
+# ----------------------------------
+
+df_clean = (
+    df_clean
+    .withColumn("year", year("order_timestamp"))
+    .withColumn("month", month("order_timestamp"))
+    .withColumn("day", dayofmonth("order_timestamp"))
+)
+
+
+# ==================================================
+# Create Dimension Tables
+# ==================================================
+
+logger.info("Creating dimension tables")
+
+dim_customer = (
+    df_clean
+    .select("customer_id", "customer_name", "email")
+    .dropDuplicates()
+)
+
+dim_product = (
+    df_clean
+    .select("product_id", "product_name", "category")
+    .dropDuplicates()
+)
+
+dim_location = (
+    df_clean
+    .select(
+        "shipping_city",
+        "shipping_state",
+        "shipping_country"
+    )
+    .dropDuplicates()
+)
+
+dim_payment = (
+    df_clean
+    .select("payment_method")
+    .dropDuplicates()
+)
+
+dim_date = (
+    df_clean
+    .select(
+        "order_timestamp",
+        "year",
+        "month",
+        "day"
+    )
+    .dropDuplicates()
+)
+
+
+# ==================================================
+# Create Fact Table
+# ==================================================
+
+logger.info("Creating fact table")
+
+fact_sales = (
+
+    df_clean.select(
+        "order_id",
+        "customer_id",
+        "product_id",
+        "payment_method",
+        "price",
+        "quantity",
+        "discount",
+        "order_status",
+        "year",
+        "month",
+        "day"
     )
 
-    logger.info("Printing schema")
-    df.printSchema()
-
-    row_count = df.count()
-    logger.info(f"Total rows read: {row_count}")
+)
 
 
-    # ----------------------------------
-    # Data Cleaning & Transformation
-    # ----------------------------------
+# ==================================================
+# Write Curated Data to S3 (Parquet)
+# ==================================================
 
-    logger.info("Applying transformations")
+logger.info("Writing curated parquet to S3")
 
-    df_clean = (
+(
+    df_clean.write
+    .mode("append")
+    .partitionBy("year", "month", "day")
+    .parquet(curated_path)
+)
 
-        df.withColumn("order_id", col("order_id").cast(IntegerType()))
-        .withColumn("amount", col("amount").cast(DoubleType()))
-        .withColumn("quantity", col("quantity").cast(IntegerType()))
-        .withColumn("customer_name", trim(col("customer_name")))
-        .withColumn("product", lower(col("product")))
-        .withColumn("processed_timestamp", current_timestamp())
 
+# ==================================================
+# Function to Write to Redshift
+# ==================================================
+
+def write_to_redshift(df, table):
+
+    dyf = DynamicFrame.fromDF(df, glueContext, table)
+
+    glueContext.write_dynamic_frame.from_options(
+        frame=dyf,
+        connection_type="redshift",
+        connection_options={
+            "connectionName": redshift_conn,
+            "dbtable": table,
+            "redshiftTmpDir": temp_dir
+        }
     )
 
 
-    # ----------------------------------
-    # Add Partition Columns
-    # ----------------------------------
+# ==================================================
+# Load Dimension Tables
+# ==================================================
 
-    logger.info("Creating partition columns")
+logger.info("Loading dimension tables to Redshift")
 
-    df_partitioned = (
-
-        df_clean
-        .withColumn("year", year("processed_timestamp"))
-        .withColumn("month", month("processed_timestamp"))
-        .withColumn("day", dayofmonth("processed_timestamp"))
-
-    )
+write_to_redshift(dim_customer, "dim_customer")
+write_to_redshift(dim_product, "dim_product")
+write_to_redshift(dim_location, "dim_location")
+write_to_redshift(dim_payment, "dim_payment")
+write_to_redshift(dim_date, "dim_date")
 
 
-    # ----------------------------------
-    # Write Data to S3 (Parquet)
-    # ----------------------------------
+# ==================================================
+# Load Fact Table
+# ==================================================
 
-    logger.info("Writing partitioned parquet to S3")
+logger.info("Loading fact table to Redshift")
 
-    (
-        df_partitioned.write
-        .mode("append")
-        .partitionBy("year", "month", "day")
-        .parquet(output_path)
-    )
-
-
-    logger.info("Data successfully written to S3")
-
-
-except Exception as e:
-
-    logger.error("Glue job failed")
-    logger.error(str(e))
-    raise
+write_to_redshift(fact_sales, "fact_sales")
 
 
 # ----------------------------------
