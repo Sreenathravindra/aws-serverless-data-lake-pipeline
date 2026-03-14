@@ -62,6 +62,7 @@ df = (
     spark.read
     .option("header", "true")
     .option("inferSchema", "true")
+    .option("multiLine", "true")
     .csv(input_path)
 )
 
@@ -73,14 +74,15 @@ df = (
 logger.info("Applying transformations")
 
 df_clean = (
-
     df.withColumn("price", col("price").cast(DoubleType()))
-    .withColumn("quantity", col("quantity").cast(IntegerType()))
-    .withColumn("discount", col("discount").cast(DoubleType()))
-    .withColumn("customer_name", trim(col("customer_name")))
-    .withColumn("product_name", lower(col("product_name")))
-    .withColumn("order_timestamp",
-                to_timestamp("order_timestamp", "dd-MM-yyyy HH:mm"))
+      .withColumn("quantity", col("quantity").cast(IntegerType()))
+      .withColumn("discount", col("discount").cast(DoubleType()))
+      .withColumn("customer_name", trim(col("customer_name")))
+      .withColumn("product_name", lower(col("product_name")))
+      .withColumn(
+          "order_timestamp",
+          to_timestamp("order_timestamp", "dd-MM-yyyy HH:mm")
+      )
 )
 
 
@@ -102,17 +104,20 @@ df_clean = (
 
 logger.info("Creating dimension tables")
 
+
 dim_customer = (
     df_clean
     .select("customer_id", "customer_name", "email")
     .dropDuplicates()
 )
 
+
 dim_product = (
     df_clean
     .select("product_id", "product_name", "category")
     .dropDuplicates()
 )
+
 
 dim_location = (
     df_clean
@@ -124,16 +129,18 @@ dim_location = (
     .dropDuplicates()
 )
 
+
 dim_payment = (
     df_clean
     .select("payment_method")
     .dropDuplicates()
 )
 
+
+# ⭐ Better Date Dimension
 dim_date = (
     df_clean
     .select(
-        "order_timestamp",
         "year",
         "month",
         "day"
@@ -149,7 +156,6 @@ dim_date = (
 logger.info("Creating fact table")
 
 fact_sales = (
-
     df_clean.select(
         "order_id",
         "customer_id",
@@ -163,7 +169,6 @@ fact_sales = (
         "month",
         "day"
     )
-
 )
 
 
@@ -186,6 +191,8 @@ logger.info("Writing curated parquet to S3")
 # ==================================================
 
 def write_to_redshift(df, table):
+
+    logger.info(f"Writing {table} to Redshift")
 
     dyf = DynamicFrame.fromDF(df, glueContext, table)
 
