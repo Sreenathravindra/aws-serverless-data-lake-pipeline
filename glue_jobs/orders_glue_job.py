@@ -8,7 +8,6 @@ from pyspark.sql.types import IntegerType, DoubleType
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
-from awsglue.dynamicframe import DynamicFrame
 
 
 # ----------------------------------
@@ -28,16 +27,12 @@ args = getResolvedOptions(
     [
         "JOB_NAME",
         "INPUT_PATH",
-        "CURATED_PATH",
-        "REDSHIFT_TEMP_DIR",
-        "REDSHIFT_CONNECTION"
+        "CURATED_PATH"
     ]
 )
 
 input_path = args["INPUT_PATH"]
 curated_path = args["CURATED_PATH"]
-temp_dir = args["REDSHIFT_TEMP_DIR"]
-redshift_conn = args["REDSHIFT_CONNECTION"]
 
 
 # ----------------------------------
@@ -74,21 +69,25 @@ df = (
 logger.info("Applying transformations")
 
 df_clean = (
+
     df.withColumn("price", col("price").cast(DoubleType()))
-      .withColumn("quantity", col("quantity").cast(IntegerType()))
-      .withColumn("discount", col("discount").cast(DoubleType()))
-      .withColumn("customer_name", trim(col("customer_name")))
-      .withColumn("product_name", lower(col("product_name")))
-      .withColumn(
-          "order_timestamp",
-          to_timestamp("order_timestamp", "dd-MM-yyyy HH:mm")
-      )
+    .withColumn("quantity", col("quantity").cast(IntegerType()))
+    .withColumn("discount", col("discount").cast(DoubleType()))
+    .withColumn("customer_name", trim(col("customer_name")))
+    .withColumn("product_name", lower(col("product_name")))
+    .withColumn(
+        "order_timestamp",
+        to_timestamp(col("order_timestamp"), "dd-MM-yyyy HH:mm")
+    )
+
 )
 
 
 # ----------------------------------
-# Create Date Columns
+# Create Date Partition Columns
 # ----------------------------------
+
+logger.info("Creating partition columns")
 
 df_clean = (
     df_clean
@@ -98,83 +97,9 @@ df_clean = (
 )
 
 
-# ==================================================
-# Create Dimension Tables
-# ==================================================
-
-logger.info("Creating dimension tables")
-
-
-dim_customer = (
-    df_clean
-    .select("customer_id", "customer_name", "email")
-    .dropDuplicates()
-)
-
-
-dim_product = (
-    df_clean
-    .select("product_id", "product_name", "category")
-    .dropDuplicates()
-)
-
-
-dim_location = (
-    df_clean
-    .select(
-        "shipping_city",
-        "shipping_state",
-        "shipping_country"
-    )
-    .dropDuplicates()
-)
-
-
-dim_payment = (
-    df_clean
-    .select("payment_method")
-    .dropDuplicates()
-)
-
-
-# ⭐ Better Date Dimension
-dim_date = (
-    df_clean
-    .select(
-        "year",
-        "month",
-        "day"
-    )
-    .dropDuplicates()
-)
-
-
-# ==================================================
-# Create Fact Table
-# ==================================================
-
-logger.info("Creating fact table")
-
-fact_sales = (
-    df_clean.select(
-        "order_id",
-        "customer_id",
-        "product_id",
-        "payment_method",
-        "price",
-        "quantity",
-        "discount",
-        "order_status",
-        "year",
-        "month",
-        "day"
-    )
-)
-
-
-# ==================================================
-# Write Curated Data to S3 (Parquet)
-# ==================================================
+# ----------------------------------
+# Write Curated Parquet to S3
+# ----------------------------------
 
 logger.info("Writing curated parquet to S3")
 
@@ -186,53 +111,6 @@ logger.info("Writing curated parquet to S3")
 )
 
 
-# ==================================================
-# Function to Write to Redshift
-# ==================================================
-
-def write_to_redshift(df, table):
-
-    logger.info(f"Writing {table} to Redshift")
-
-    dyf = DynamicFrame.fromDF(df, glueContext, table)
-
-    glueContext.write_dynamic_frame.from_options(
-        frame=dyf,
-        connection_type="redshift",
-        connection_options={
-            "connectionName": redshift_conn,
-            "dbtable": table,
-            "redshiftTmpDir": temp_dir
-        }
-    )
-
-
-# ==================================================
-# Load Dimension Tables
-# ==================================================
-
-logger.info("Loading dimension tables to Redshift")
-
-write_to_redshift(dim_customer, "dim_customer")
-write_to_redshift(dim_product, "dim_product")
-write_to_redshift(dim_location, "dim_location")
-write_to_redshift(dim_payment, "dim_payment")
-write_to_redshift(dim_date, "dim_date")
-
-
-# ==================================================
-# Load Fact Table
-# ==================================================
-
-logger.info("Loading fact table to Redshift")
-
-write_to_redshift(fact_sales, "fact_sales")
-
-
-# ----------------------------------
-# Commit Job
-# ----------------------------------
+logger.info("Glue Job Completed Successfully")
 
 job.commit()
-
-logger.info("Glue Job Completed Successfully")
