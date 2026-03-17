@@ -61,15 +61,14 @@ Amazon S3 (Curated Layer)
 ```
 aws-glue-pyspark-batch-pipeline
 │
-├── scripts
-│   └── glue_etl_job.py
-│
-├── data
-│   └── sample_orders.csv
+├── glue_jobs
+│   └── orders_glue_job.py          # AWS Glue PySpark ETL job
 │
 ├── .github
 │   └── workflows
-│       └── deploy_glue_job.yml
+│       └── deploy-glue.yml         # CI/CD pipeline to deploy Glue job
+│
+├── requirements.txt                # Python dependencies
 │
 └── README.md
 ```
