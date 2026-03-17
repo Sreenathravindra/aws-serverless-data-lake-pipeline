@@ -46,6 +46,9 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
+logger.info(f"Starting Glue Job: {args['JOB_NAME']}")
+logger.info(f"Reading input data from: {input_path}")
+
 
 # ----------------------------------
 # Read Validated Data from S3
@@ -53,29 +56,29 @@ job.init(args["JOB_NAME"], args)
 
 df = (
     spark.read
-    .option("header","true")
-    .option("inferSchema","true")
-    .option("multiLine","true")
-    .option("quote",'"')
-    .option("escape",'"')
-    .option("recursiveFileLookup","true")
+    .option("header", "true")
+    .option("multiLine", "true")
+    .option("quote", '"')
+    .option("escape", '"')
+    .option("recursiveFileLookup", "true")
     .csv(input_path)
 )
 
-print("Rows:", df.count())
+logger.info("Input data successfully loaded")
 
-df.show(5, False)
+df.printSchema()
 
 
 # ----------------------------------
-# Data Cleaning
+# Data Cleaning & Transformations
 # ----------------------------------
 
-logger.info("Applying transformations")
+logger.info("Applying data transformations")
 
 df_clean = (
 
-    df.withColumn("price", col("price").cast(DoubleType()))
+    df
+    .withColumn("price", col("price").cast(DoubleType()))
     .withColumn("quantity", col("quantity").cast(IntegerType()))
     .withColumn("discount", col("discount").cast(DoubleType()))
     .withColumn("customer_name", trim(col("customer_name")))
@@ -87,14 +90,28 @@ df_clean = (
 
 )
 
+# Remove records with invalid timestamps
+
+df_clean = df_clean.filter(col("order_timestamp").isNotNull())
+
 
 # ----------------------------------
-# Create Date Partition Columns
+# Add Processing Metadata
+# ----------------------------------
+
+df_clean = df_clean.withColumn(
+    "processed_timestamp",
+    current_timestamp()
+)
+
+
+# ----------------------------------
+# Create Partition Columns
 # ----------------------------------
 
 logger.info("Creating partition columns")
 
-df_clean = (
+df_partitioned = (
     df_clean
     .withColumn("year", year("order_timestamp"))
     .withColumn("month", month("order_timestamp"))
@@ -106,15 +123,22 @@ df_clean = (
 # Write Curated Parquet to S3
 # ----------------------------------
 
-logger.info("Writing curated parquet to S3")
+logger.info("Writing curated parquet data to S3")
 
 (
-    df_clean.write
+    df_partitioned
+    .repartition("year", "month")  # better write performance
+    .write
     .mode("append")
     .partitionBy("year", "month", "day")
     .parquet(curated_path)
 )
 
+logger.info("Data successfully written to curated layer")
+
+# ----------------------------------
+# Job Completion
+# ----------------------------------
 
 logger.info("Glue Job Completed Successfully")
 
